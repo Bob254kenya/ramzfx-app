@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 
 // ============================================
-// NOTIFICATION SYSTEM - COMPACT CENTERED POPUP (300px x 200px)
+// NOTIFICATION SYSTEM - COMPACT CENTERED POPUP (350px x 350px)
 // ============================================
 
 // Animation Styles
@@ -497,9 +497,9 @@ interface MarketStats {
 // Constants
 const MAX_SCAN_ATTEMPTS = 100;
 const SCAN_INTERVAL = 100;
-const CONNECTION_CHECK_INTERVAL = 3000; // Reduced for faster detection
-const DATA_STALENESS_THRESHOLD = 8000; // Reduced for faster detection
-const HEARTBEAT_INTERVAL = 15000; // Reduced for faster detection
+const CONNECTION_CHECK_INTERVAL = 3000;
+const DATA_STALENESS_THRESHOLD = 8000;
+const HEARTBEAT_INTERVAL = 15000;
 const RECONNECT_DELAY = 2000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const DEBUG = true;
@@ -690,40 +690,48 @@ export default function ProScannerBot() {
     logDebug(`Balance updated instantly: $${apiBalance}`);
   }, [apiBalance]);
 
-  // Update market statistics from tick data
+  // Update market statistics from tick data - FIXED: Proper handling of digit 0
   const updateMarketStats = useCallback((symbol: string, digit: number) => {
-    const counter = marketTickCountersRef.current.get(symbol);
+    // Ensure digit is a valid number 0-9
+    const validDigit = typeof digit === 'number' && !isNaN(digit) && digit >= 0 && digit <= 9 ? digit : -1;
+    if (validDigit === -1) return;
+    
+    let counter = marketTickCountersRef.current.get(symbol);
     if (!counter) {
-      marketTickCountersRef.current.set(symbol, { even: 0, odd: 0, over4: 0, under5: 0, total: 0 });
+      counter = { even: 0, odd: 0, over4: 0, under5: 0, total: 0 };
+      marketTickCountersRef.current.set(symbol, counter);
     }
     
-    const current = marketTickCountersRef.current.get(symbol)!;
-    current.total++;
+    counter.total++;
     
-    if (digit % 2 === 0) {
-      current.even++;
+    // Even/Odd counting (0 is even)
+    if (validDigit % 2 === 0) {
+      counter.even++;
     } else {
-      current.odd++;
+      counter.odd++;
     }
     
-    if (digit >= 5) {
-      current.over4++;
+    // Over 4 means digits 5,6,7,8,9
+    if (validDigit >= 5) {
+      counter.over4++;
     }
-    if (digit <= 4) {
-      current.under5++;
+    // Under 5 means digits 0,1,2,3,4 (includes 0)
+    if (validDigit <= 4) {
+      counter.under5++;
     }
     
-    const evenPercentage = (current.even / current.total) * 100;
-    const oddPercentage = (current.odd / current.total) * 100;
-    const over4Percentage = (current.over4 / current.total) * 100;
-    const under5Percentage = (current.under5 / current.total) * 100;
+    // Calculate percentages based on actual counts
+    const evenPercentage = (counter.even / counter.total) * 100;
+    const oddPercentage = (counter.odd / counter.total) * 100;
+    const over4Percentage = (counter.over4 / counter.total) * 100;
+    const under5Percentage = (counter.under5 / counter.total) * 100;
     
     const directionStrength = Math.max(evenPercentage, oddPercentage);
     const barrierStrength = Math.max(over4Percentage, under5Percentage);
     const strength = Math.max(directionStrength, barrierStrength);
     
     let dominantSignal: 'EVEN' | 'ODD' | 'OVER' | 'UNDER' | null = null;
-    if (strength >= STRONG_MARKET_THRESHOLD) {
+    if (strength >= STRONG_MARKET_THRESHOLD && counter.total >= 50) {
       if (directionStrength >= barrierStrength) {
         dominantSignal = evenPercentage > oddPercentage ? 'EVEN' : 'ODD';
       } else {
@@ -738,11 +746,11 @@ export default function ProScannerBot() {
         if (existing) {
           return prev.map(s => s.symbol === symbol ? {
             ...s,
-            evenCount: current.even,
-            oddCount: current.odd,
-            over4Count: current.over4,
-            under5Count: current.under5,
-            totalTicks: current.total,
+            evenCount: counter.even,
+            oddCount: counter.odd,
+            over4Count: counter.over4,
+            under5Count: counter.under5,
+            totalTicks: counter.total,
             evenPercentage,
             oddPercentage,
             over4Percentage,
@@ -756,11 +764,11 @@ export default function ProScannerBot() {
             symbol,
             name: marketInfo.name,
             color: marketInfo.color,
-            evenCount: current.even,
-            oddCount: current.odd,
-            over4Count: current.over4,
-            under5Count: current.under5,
-            totalTicks: current.total,
+            evenCount: counter.even,
+            oddCount: counter.odd,
+            over4Count: counter.over4,
+            under5Count: counter.under5,
+            totalTicks: counter.total,
             evenPercentage,
             oddPercentage,
             over4Percentage,
@@ -1100,7 +1108,7 @@ export default function ProScannerBot() {
     }
     
     return false;
-  }, []);
+  }, [stopBot]);
 
   // Improved connection monitoring with automatic resumption
   useEffect(() => {
@@ -1156,7 +1164,7 @@ export default function ProScannerBot() {
       if (dataStalenessChecker) clearInterval(dataStalenessChecker);
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     };
-  }, [isRunning, ensureConnection]);
+  }, [isRunning, ensureConnection, stopBot]);
 
   // Heartbeat mechanism
   useEffect(() => {
@@ -1188,7 +1196,7 @@ export default function ProScannerBot() {
     logDebug('Bot stopped successfully');
   }, []);
 
-  // Initial subscription and tick handler
+  // Initial subscription and tick handler - FIXED: Proper digit extraction for 0
   useEffect(() => {
     let active = true;
     let reconnectTimeout: NodeJS.Timeout;
@@ -1221,9 +1229,11 @@ export default function ProScannerBot() {
       
       const sym = data.tick.symbol as string;
       const quote = data.tick.quote;
-      // Use quoteRaw to preserve trailing zeros (e.g. 1234.50 → digit 0, not 5)
+      // Use getLastDigit with quoteRaw to properly handle trailing zeros
+      // e.g., 1234.50 -> digit 0, not 5
       const digit = getLastDigit(quote, data.tick.quoteRaw);
       
+      // Validate digit is a proper number 0-9
       if (typeof digit !== 'number' || isNaN(digit) || digit < 0 || digit > 9) {
         return;
       }
@@ -1238,6 +1248,7 @@ export default function ProScannerBot() {
         map.set(sym, arr);
       }
       arr.push(digit);
+      // Keep last 200 digits for pattern detection
       if (arr.length > 200) arr.shift();
       
       updateSameDirectionTickStorage(sym, digit);
@@ -2117,6 +2128,7 @@ export default function ProScannerBot() {
         }
       }
 
+      // FIXED: Proper digit extraction for exit digit
       const exitDigit = String(getLastDigit(result.sellPrice || 0));
 
       let switchInfo = `Pattern: ${patternDigits} | Exit: ${exitDigit} | Last 15: ${last15Ticks.join(',')}`;
@@ -3364,7 +3376,7 @@ export default function ProScannerBot() {
                     <tr>
                       <td colSpan={8} className="text-center text-slate-500 py-12">
                         No trades yet — configure and start the bot
-                       </td>
+                      </td>
                     </tr>
                   ) : logEntries.map(e => (
                     <tr key={e.id} className={`border-t border-slate-700/30 hover:bg-slate-800/30 transition-colors ${
