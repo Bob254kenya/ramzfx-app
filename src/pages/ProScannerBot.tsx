@@ -462,7 +462,6 @@ const ALL_MARKETS = [
   { symbol: '1HZ30V', name: 'Volatility 30 (1s)', group: 'vol1s' },
   { symbol: '1HZ50V', name: 'Volatility 50 (1s)', group: 'vol1s' },
   { symbol: '1HZ75V', name: 'Volatility 75 (1s)', group: 'vol1s' },
-  { symbol: '1HZ90V', name: 'Volatility 90 (1s)', group: 'vol1s' },
   { symbol: '1HZ100V', name: 'Volatility 100 (1s)', group: 'vol1s' },
   { symbol: 'R_10', name: 'Volatility 10', group: 'vol' },
   { symbol: 'R_25', name: 'Volatility 25', group: 'vol' },
@@ -537,17 +536,12 @@ function calculateChartDigitStats(symbol: string, tickRange: number) {
   for (let i = 0; i <= 9; i++) frequency[i] = 0;
   
   for (const digit of recentTicks) {
-    // Explicit pre-initialized increment — no || 0 risk for digit 0
-    frequency[digit]++;
+    frequency[digit] = (frequency[digit] || 0) + 1;
   }
   
-  const total = recentTicks.length;
   const percentages: Record<number, number> = {};
   for (let i = 0; i <= 9; i++) {
-    // Guard against division by zero; enforce 1 decimal place
-    percentages[i] = total > 0
-      ? parseFloat(((frequency[i] / total) * 100).toFixed(1))
-      : 0;
+    percentages[i] = recentTicks.length > 0 ? (frequency[i] / recentTicks.length) * 100 : 0;
   }
   
   let mostCommon = 0;
@@ -589,12 +583,12 @@ function calculateChartDigitStats(symbol: string, tickRange: number) {
     secondMost,
     leastCommon,
     totalTicks: recentTicks.length,
-    evenPercentage: recentTicks.length > 0 ? parseFloat(((evenCount / recentTicks.length) * 100).toFixed(1)) : 50,
-    oddPercentage: recentTicks.length > 0 ? parseFloat(((oddCount / recentTicks.length) * 100).toFixed(1)) : 50,
-    overPercentage: recentTicks.length > 0 ? parseFloat(((overCount / recentTicks.length) * 100).toFixed(1)) : 50,
-    underPercentage: recentTicks.length > 0 ? parseFloat(((underCount / recentTicks.length) * 100).toFixed(1)) : 50,
-    over3Percentage: recentTicks.length > 0 ? parseFloat(((over3Count / recentTicks.length) * 100).toFixed(1)) : 50,
-    under6Percentage: recentTicks.length > 0 ? parseFloat(((under6Count / recentTicks.length) * 100).toFixed(1)) : 50,
+    evenPercentage: recentTicks.length > 0 ? (evenCount / recentTicks.length * 100) : 50,
+    oddPercentage: recentTicks.length > 0 ? (oddCount / recentTicks.length * 100) : 50,
+    overPercentage: recentTicks.length > 0 ? (overCount / recentTicks.length * 100) : 50,
+    underPercentage: recentTicks.length > 0 ? (underCount / recentTicks.length * 100) : 50,
+    over3Percentage: recentTicks.length > 0 ? (over3Count / recentTicks.length * 100) : 50,
+    under6Percentage: recentTicks.length > 0 ? (under6Count / recentTicks.length * 100) : 50,
     last26Digits,
     tickPrices: last26Prices,
   };
@@ -618,7 +612,8 @@ const TradingChartPopup = ({ onClose, isRunning }: { onClose: () => void; isRunn
   const dragHandleRef = useRef<HTMLDivElement>(null);
   
   const lastSpokenSignal = useRef('');
-  const subscriptionHandlerRef = useRef<((data: any) => void) | null>(null);
+  const subscribedRef = useRef(false);
+  const subscriptionRef = useRef<any>(null);
   
   // Drag handlers
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -736,13 +731,13 @@ const TradingChartPopup = ({ onClose, isRunning }: { onClose: () => void; isRunn
     let active = true;
     
     const cleanup = async () => {
-      if (subscriptionHandlerRef.current) {
+      if (subscriptionRef.current) {
         try {
-          await derivApi.unsubscribeTicks(symbol as MarketSymbol, subscriptionHandlerRef.current);
+          await derivApi.unsubscribeTicks(symbol as MarketSymbol);
         } catch (err) {
           console.error('Error unsubscribing:', err);
         }
-        subscriptionHandlerRef.current = null;
+        subscriptionRef.current = null;
       }
     };
     
@@ -763,16 +758,13 @@ const TradingChartPopup = ({ onClose, isRunning }: { onClose: () => void; isRunn
         
         updateDigitStats();
         
-        if (!subscriptionHandlerRef.current) {
-          subscriptionHandlerRef.current = (data: any) => {
+        if (!subscribedRef.current || !subscriptionRef.current) {
+          subscriptionRef.current = await derivApi.subscribeTicks(symbol as MarketSymbol, (data: any) => {
             if (!active || !data.tick) return;
             const quote = data.tick.quote;
-            // Use quoteRaw to preserve trailing zeros (e.g. 1234.50 → digit 0)
-            const digit = getLastDigit(quote, data.tick.quoteRaw);
+            const digit = getLastDigit(quote);
             addChartTick(symbol, digit, quote);
-          };
-          
-          await derivApi.subscribeTicks(symbol as MarketSymbol, subscriptionHandlerRef.current);
+          });
           subscribedRef.current = true;
         }
       } catch (err) {
@@ -1325,7 +1317,7 @@ function simulateVirtualContract(
       if (data.tick && data.tick.symbol === symbol) {
         clearTimeout(timeout);
         unsub();
-        const digit = getLastDigit(data.tick.quote, data.tick.quoteRaw);
+        const digit = getLastDigit(data.tick.quote);
         const b = parseInt(barrier) || 0;
         let won = false;
         switch (contractType) {
@@ -1683,8 +1675,7 @@ export default function ProScannerBot() {
     const handler = (data: any) => {
       if (!data.tick || !active) return;
       const sym = data.tick.symbol as string;
-      // Use quoteRaw to preserve trailing zeros (e.g. 1234.50 → digit 0, not 5)
-      const digit = getLastDigit(data.tick.quote, data.tick.quoteRaw);
+      const digit = getLastDigit(data.tick.quote);
       const now = performance.now();
 
       const map = tickMapRef.current;
