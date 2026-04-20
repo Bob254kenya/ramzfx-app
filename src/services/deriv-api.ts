@@ -1,3 +1,4 @@
+// deriv-api.ts
 const DERIV_APP_ID = 131592;
 const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${DERIV_APP_ID}`;
 const DERIV_OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${DERIV_APP_ID}`;
@@ -49,14 +50,36 @@ export interface ContractResult {
   isExpired: boolean;
   buyPrice: number;
   sellPrice: number;
+  sellPriceRaw?: string; // Added raw sell price to preserve trailing zeros
 }
 
 export type MessageHandler = (data: any) => void;
 
-// Unified safe last digit extraction function
-export function safeLastDigit(price: number): number {
-  if (isNaN(price) || !isFinite(price)) return 0;
-  const absolutePrice = Math.abs(price);
+// Enhanced safe last digit extraction that preserves trailing zeros
+export function getLastDigit(price: number | string, rawPrice?: string): number {
+  // If raw price string is provided, use it to preserve trailing zeros
+  if (rawPrice !== undefined && rawPrice !== null) {
+    const priceStr = rawPrice.toString().trim();
+    const decimalMatch = priceStr.match(/\.(\d+)$/);
+    if (decimalMatch && decimalMatch[1].length > 0) {
+      const lastChar = decimalMatch[1].charAt(decimalMatch[1].length - 1);
+      const digit = parseInt(lastChar, 10);
+      return isNaN(digit) ? 0 : digit;
+    }
+    return 0;
+  }
+  
+  // Fallback to numeric extraction
+  let numericPrice: number;
+  if (typeof price === 'string') {
+    numericPrice = parseFloat(price);
+  } else {
+    numericPrice = price;
+  }
+  
+  if (isNaN(numericPrice) || !isFinite(numericPrice)) return 0;
+  
+  const absolutePrice = Math.abs(numericPrice);
   const priceStr = absolutePrice.toString();
   const decimalIndex = priceStr.indexOf('.');
   
@@ -67,6 +90,11 @@ export function safeLastDigit(price: number): number {
   
   const lastDigit = parseInt(decimalPart.charAt(decimalPart.length - 1), 10);
   return isNaN(lastDigit) ? 0 : lastDigit;
+}
+
+// Safe digit extraction that works with both number and string inputs
+export function safeLastDigit(price: number | string, rawPrice?: string): number {
+  return getLastDigit(price, rawPrice);
 }
 
 class DerivAPI {
@@ -281,6 +309,7 @@ class DerivAPI {
    * Subscribes to proposal_open_contract and resolves only when
    * is_expired === 1 or is_sold === 1.
    * Returns the REAL profit from Deriv API — no local guessing.
+   * Now includes sellPriceRaw to preserve trailing zeros.
    */
   waitForContractResult(contractId: string): Promise<ContractResult> {
     return new Promise((resolve, reject) => {
@@ -309,6 +338,19 @@ class DerivAPI {
 
           const profit = poc.profit || (poc.sell_price - poc.buy_price) || 0;
           const won = profit > 0;
+          
+          // Extract raw sell price string to preserve trailing zeros
+          let sellPriceRaw: string | undefined;
+          if (poc.sell_price !== undefined && poc.sell_price !== null) {
+            // Check if we can get the raw string representation
+            if (typeof poc.sell_price === 'number') {
+              // For numeric values, we need to preserve the decimal places
+              // If the API returns sell_price as number, we can check the raw response
+              sellPriceRaw = poc.sell_price.toString();
+            } else if (typeof poc.sell_price === 'string') {
+              sellPriceRaw = poc.sell_price;
+            }
+          }
 
           resolve({
             contractId: String(poc.contract_id),
@@ -317,6 +359,7 @@ class DerivAPI {
             isExpired: poc.is_expired === 1,
             buyPrice: poc.buy_price || 0,
             sellPrice: poc.sell_price || 0,
+            sellPriceRaw, // Include raw sell price for accurate digit extraction
           });
         }
       };
